@@ -1,0 +1,122 @@
+name: Release
+
+# Publishing runs only for tags, so a merge to main can never ship a release by
+# accident. The tag must be v<VERSION> and match vulnhunter.VERSION exactly.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and verify distribution
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Check the tag matches vulnhunter.VERSION
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          version=$(python -c "import vulnhunter; print(vulnhunter.VERSION)")
+          if [ "v${version}" != "${TAG}" ]; then
+            echo "::error title=Version mismatch::tag ${TAG} does not match vulnhunter.VERSION ${version}. Bump VERSION or retag."
+            exit 1
+          fi
+          echo "Building ${version}"
+
+      - name: Tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Build sdist and wheel
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet --upgrade build
+          python -m build
+          ls -l dist
+
+      # Install the wheel offline (--no-index proves the package has no runtime
+      # dependencies) into a fresh virtualenv and drive the real console script.
+      - name: Check the console script from the built wheel
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          venv="${RUNNER_TEMP}/wheel-check"
+          python -m venv "${venv}"
+          "${venv}/bin/python" -m pip install --quiet --no-index --find-links dist vulnhunter
+          "${venv}/bin/python" -m pip check
+          installed=$("${venv}/bin/vulnhunter" --version)
+          if [ "${installed}" != "Vulnhunter ${version}" ]; then
+            echo "::error title=Console script mismatch::expected 'Vulnhunter ${version}', got '${installed}'"
+            exit 1
+          fi
+          "${venv}/bin/vulnhunter" --list-checks
+          "${venv}/bin/vulnhunter" --help > /dev/null
+
+      - name: Upload distribution
+        uses: actions/upload-artifact@v7
+        with:
+          name: dist
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: pypi
+      url: https://pypi.org/p/vulnhunter
+    # Trusted publishing: PyPI verifies this workflow through OIDC, so there is
+    # no API token or repository secret to leak or rotate. Configure the
+    # publisher on PyPI first (see README -> Releases).
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      - uses: pypa/gh-action-pypi-publish@release/v1
+
+  release:
+    name: Create GitHub Release
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write # required to create the release and attach files
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: dist
+          path: dist
+
+      # Runs after PyPI succeeds, so a tag is only announced once the package it
+      # points at is actually downloadable. Re-running a failed job reuses the
+      # existing release instead of failing on the duplicate.
+      - name: Create release and attach sdist and wheel
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if gh release view "${TAG}" --repo "${GITHUB_REPOSITORY}" > /dev/null 2>&1; then
+            echo "::notice title=Release exists::${TAG} is already released; uploading missing files."
+            gh release upload "${TAG}" dist/* --clobber --repo "${GITHUB_REPOSITORY}"
+          else
+            gh release create "${TAG}" dist/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --title "${TAG}" \
+              --generate-notes \
+              --verify-tag
+          fi

@@ -2016,9 +2016,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     return 0
 
 
-if __name__ == "__main__":
+def cli() -> int:
+    """Console-script entry point: same behaviour as running the file directly."""
     try:
-        sys.exit(main())
+        return main()
     except KeyboardInterrupt:
         sys.stderr.write("\ninterrupted\n")
-        sys.exit(130)
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(cli())

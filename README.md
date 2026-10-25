@@ -40,12 +40,26 @@ Summary: 1 high  4 medium  3 low  1 info  (9 finding(s))
 
 ## Requirements
 
-Python 3.8 or newer. Nothing else — no `pip install`, no virtualenv.
+Python 3.8 or newer. Nothing else — no dependencies, no virtualenv.
+
+## Install (optional)
+
+Vulnhunter runs straight from the single file, so installing is only useful if
+you want a `vulnhunter` command on your `PATH`:
+
+```bash
+pip install .        # or: pipx install .
+vulnhunter --version
+```
+
+The package has no runtime dependencies; the version comes from
+`vulnhunter.VERSION`, so there is only one place to bump it.
 
 ## Usage
 
 ```bash
-python3 vulnhunter.py <target> [options]
+python3 vulnhunter.py <target> [options]   # direct
+vulnhunter <target> [options]             # after pip install .
 ```
 
 Common invocations:
@@ -233,6 +247,39 @@ alerts.
 
 Since the scan hits a live system, the workflow uses `--authorized` on your
 behalf: only configure a target you are allowed to test.
+
+## Releases
+
+[.github/workflows/release.yml](.github/workflows/release.yml) runs on tags only,
+so merging to `main` can never ship a release by accident:
+
+* The tag must be `v<VERSION>` and match `VERSION` in `vulnhunter.py`. A mismatch
+  fails the run before anything is built.
+* The test suite runs, then `python -m build` produces the sdist and the wheel.
+* The wheel is installed into a clean virtualenv with `--no-index`, which proves
+  the package really has no runtime dependencies; `pip check` runs, and the
+  installed `vulnhunter --version`, `--list-checks` and `--help` must work and
+  report the tagged version.
+* Both files are kept as the `dist` build artifact and published to PyPI using
+  [trusted publishing](https://docs.pypi.org/trusted-publishers/), so no API token
+  lives in the repository.
+* Once PyPI succeeds, a GitHub Release is created for the tag with the sdist and
+  wheel attached and notes generated from the commits since the previous tag.
+  Re-running a failed job uploads any missing assets instead of failing on the
+  existing release. It uses the automatic `GITHUB_TOKEN` with `contents: write`,
+  so no extra configuration is needed beyond allowing workflows write access.
+
+Register the publisher once on PyPI — owner and repository, workflow
+`release.yml`, environment `pypi` (PyPI also offers a *pending publisher* for a
+name that has no project yet) — then tag a release:
+
+```bash
+git tag v1.0.0 && git push origin v1.0.0
+```
+
+Prefer an API token? Add it as a `PYPI_API_TOKEN` secret, drop the `id-token:
+write` permission and give the publish step `password: ${{ secrets.PYPI_API_TOKEN }}`
+with `user: __token__`.
 
 ## Limitations
 

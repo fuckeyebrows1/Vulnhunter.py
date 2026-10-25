@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vulnhunter"
+description = "Authorized, read-only web application vulnerability scanner with no dependencies beyond the standard library"
+readme = "README.md"
+requires-python = ">=3.8"
+keywords = ["security", "scanner", "sarif", "vulnerability", "web"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Security",
+]
+# Version lives in vulnhunter.VERSION so there is only one place to bump it.
+dynamic = ["version"]
+
+[project.scripts]
+vulnhunter = "vulnhunter:cli"
+
+[tool.setuptools]
+# Single-module project: install vulnhunter.py as a top-level module and leave
+# the tests out of the distribution.
+py-modules = ["vulnhunter"]
+
+[tool.setuptools.dynamic]
+version = { attr = "vulnhunter.VERSION" }
