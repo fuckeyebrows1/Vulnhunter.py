@@ -1,0 +1,5 @@
+reports/
+vulnhunter-*.json
+vulnhunter-*.html
+__pycache__/
+*.pyc

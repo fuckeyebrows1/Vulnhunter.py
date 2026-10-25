@@ -1,0 +1,200 @@
+name: Vulnhunter
+
+# Unit tests run on every push and pull request. The scan job runs on a schedule
+# or on demand, because it needs reachable targets and explicit authorization.
+#
+# Targets come from the SCAN_TARGETS repository variable: a JSON array of URLs or
+# a whitespace/comma separated list. Each target is scanned in its own matrix job
+# and uploaded under its own code scanning category (vulnhunter/<slug>), so
+# alerts from different hosts never overwrite each other.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "URL to scan (defaults to the STAGING_URL repository variable)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: vulnhunter-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Tests (Python ${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.8", "3.12"]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Unit tests
+        run: python -m unittest discover -s tests -v
+
+  targets:
+    name: Resolve scan targets
+    needs: test
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.resolve.outputs.matrix }}
+    steps:
+      - name: Build scan matrix
+        id: resolve
+        env:
+          # SCAN_TARGETS (Settings -> Secrets and variables -> Actions ->
+          # Variables) holds every URL to scan. STAGING_URL is still honoured as
+          # a single-target fallback; workflow_dispatch target overrides both.
+          INPUT_TARGET: ${{ inputs.target }}
+          SCAN_TARGETS: ${{ vars.SCAN_TARGETS }}
+          DEFAULT_TARGET: ${{ vars.STAGING_URL }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import re
+          import sys
+          from urllib.parse import urlsplit
+
+
+          def split_targets(raw):
+              """Accept a JSON array of URLs or a whitespace/comma separated list."""
+              text = raw.strip()
+              if not text:
+                  return []
+              if text[0] in "[{":
+                  try:
+                      parsed = json.loads(text)
+                  except ValueError as exc:
+                      sys.exit("::error title=Invalid SCAN_TARGETS::%s" % exc)
+                  if not isinstance(parsed, list):
+                      sys.exit(
+                          "::error title=Invalid SCAN_TARGETS::expected a JSON "
+                          "array of URLs, e.g. [\"https://staging.example.com\"]"
+                      )
+                  return [str(item) for item in parsed]
+              return [part for part in re.split(r"[\s,]+", text) if part]
+
+
+          def slug_for(url):
+              """Stable category suffix built from the host and path."""
+              parts = urlsplit(url if "://" in url else "https://" + url)
+              stem = (parts.netloc + parts.path).lower()
+              return re.sub(r"[^a-z0-9]+", "-", stem).strip("-")[:60] or "target"
+
+
+          chosen = os.environ.get("INPUT_TARGET", "")
+          source = "the workflow_dispatch target"
+          if not chosen.strip():
+              chosen = os.environ.get("SCAN_TARGETS", "")
+              source = "the SCAN_TARGETS variable"
+          if not chosen.strip():
+              chosen = os.environ.get("DEFAULT_TARGET", "")
+              source = "the STAGING_URL variable"
+
+          include = []
+          slugs = {}
+          for entry in split_targets(chosen):
+              target = entry.strip()
+              if not target:
+                  continue
+              parsed = urlsplit(target if "://" in target else "https://" + target)
+              if parsed.scheme.lower() not in ("http", "https") or not parsed.netloc:
+                  sys.exit(
+                      "::error title=Invalid scan target::%s is not an http(s) URL "
+                      "(from %s)" % (target, source)
+                  )
+              if any(item["target"] == target for item in include):
+                  continue  # drop duplicates so a target is never scanned twice
+              slug = slug_for(target)
+              seen = slugs.get(slug, 0) + 1
+              slugs[slug] = seen
+              if seen > 1:
+                  slug = "%s-%d" % (slug, seen)
+              include.append({"target": target, "slug": slug})
+
+          if not include:
+              print(
+                  "::warning title=No scan targets::Set the SCAN_TARGETS repository "
+                  "variable, or STAGING_URL, or pass a target to workflow_dispatch. "
+                  "Skipping the scan."
+              )
+          else:
+              print("Scanning %d target(s) from %s:" % (len(include), source))
+              for item in include:
+                  print("  %s -> category vulnhunter/%s" % (item["target"], item["slug"]))
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write("matrix=%s\n" % json.dumps({"include": include}, separators=(",", ":")))
+          PY
+
+  scan:
+    name: Scan ${{ matrix.target }}
+    needs: targets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false # one unreachable target must not cancel the others
+      matrix: ${{ fromJSON(needs.targets.outputs.matrix) }}
+    permissions:
+      contents: read
+      security-events: write # required to upload SARIF to code scanning
+    env:
+      TARGET: ${{ matrix.target }}
+      SLUG: ${{ matrix.slug }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Run scan
+        run: |
+          set -euo pipefail
+          python vulnhunter.py "${TARGET}" \
+            --authorized \
+            --no-color \
+            --delay 0.2 \
+            --sarif "${SLUG}.sarif" \
+            --json "${SLUG}.json" \
+            --html "${SLUG}.html" \
+            --sarif-location .github/workflows/vulnhunter.yml
+
+      # GitHub code scanning only displays results whose physical location is a
+      # file that exists in the scanned commit, which is why the scan above
+      # attaches every finding to this workflow file. Point --sarif-location at
+      # whichever committed file genuinely defines the scanned target (for
+      # example an infrastructure or deploy config) if you have a better one.
+      #
+      # The category is vulnhunter/<slug>, derived from the target's host and
+      # path and therefore stable between runs, so each host keeps its own set
+      # of alerts instead of replacing the previous target's results.
+      - name: Upload SARIF to code scanning
+        if: hashFiles(format('{0}.sarif', matrix.slug)) != ''
+        uses: github/codeql-action/upload-sarif@v4
+        with:
+          sarif_file: ${{ matrix.slug }}.sarif
+          category: vulnhunter/${{ matrix.slug }}
+
+      - name: Upload reports
+        if: hashFiles(format('{0}.json', matrix.slug)) != ''
+        uses: actions/upload-artifact@v7
+        with:
+          name: vulnhunter-${{ matrix.slug }}
+          path: |
+            ${{ matrix.slug }}.json
+            ${{ matrix.slug }}.html
+            ${{ matrix.slug }}.sarif
+          if-no-files-found: ignore
