@@ -30,11 +30,29 @@ concurrency:
 jobs:
   test:
     name: Tests (Python ${{ matrix.python }})
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
+      # Each leg names its runner image explicitly rather than sharing
+      # ubuntu-latest, so the supported range is also tested against more than
+      # one glibc/OpenSSL baseline. Only 3.12 follows ubuntu-latest, because it
+      # is the one version with builds for every current and announced image.
       matrix:
-        python: ["3.8", "3.12"]
+        include:
+          # 3.8 is pinned to an explicit image: the actions/python-versions
+          # manifest has no 3.8 build for ubuntu-26.04, so following
+          # ubuntu-latest across its next migration would break this leg.
+          # ubuntu-24.04 publishes 3.8.18.
+          - python: "3.8"
+            runner: ubuntu-24.04
+          # Middle version on the older, still-GA 22.04 image (3.11.18 is
+          # published for it). This keeps coverage of the older baseline that
+          # many self-built environments still run; move it to a current image
+          # when GitHub retires 22.04.
+          - python: "3.11"
+            runner: ubuntu-22.04
+          - python: "3.12"
+            runner: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: actions/setup-python@v7

@@ -172,8 +172,13 @@ attributed to the URL that actually served the content.
 
 [.github/workflows/vulnhunter.yml](.github/workflows/vulnhunter.yml) is included and does two things:
 
-* **Tests** run on every push to `main` and every pull request, on Python 3.8 and
-  3.12.
+* **Tests** run on every push to `main` and every pull request, on Python 3.8,
+  3.11 and 3.12 — the documented minimum, a middle release, and the current one.
+  Each leg names its runner image instead of sharing `ubuntu-latest`, so the code
+  is also exercised against more than one glibc/OpenSSL baseline: 3.8 on
+  `ubuntu-24.04` (there is no 3.8 build for `ubuntu-26.04`), 3.11 on the older but
+  still-supported `ubuntu-22.04`, and 3.12 tracking `ubuntu-latest`. When GitHub
+  retires Ubuntu 22.04, the 3.11 leg needs moving to a newer image.
 * **Scan** runs weekly (Mondays 06:00 UTC) and on manual dispatch. It scans every
   target listed in the `SCAN_TARGETS` repository variable, one matrix job per
   target, uploading each result under its own code scanning category and keeping
